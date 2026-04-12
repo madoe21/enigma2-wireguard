@@ -1,0 +1,49 @@
+#!/bin/sh
+# Post-Install Script
+
+PLUGIN_DIR=/usr/lib/enigma2/python/Plugins/Extensions/WireGuard
+SHIM_SRC="$PLUGIN_DIR/resolvconf-shim"
+SHIM_DST=/usr/bin/resolvconf
+SHIM_MARKER="WG_SIMPLE_SHIM_MARKER_v1"
+
+# WireGuard Config-Verzeichnis anlegen
+mkdir -p /etc/wireguard
+chmod 700 /etc/wireguard
+
+# Kernel-Modul laden (falls vorhanden)
+modprobe wireguard 2>/dev/null || true
+
+# resolvconf-Shim installieren, damit wg-quick DNS korrekt setzen kann.
+# Wichtig: KEIN echtes resolvconf/openresolv überschreiben!
+if [ -f "$SHIM_SRC" ]; then
+    install_shim=0
+    if [ ! -e "$SHIM_DST" ]; then
+        # Nichts vorhanden - Shim installieren
+        install_shim=1
+    elif grep -q "$SHIM_MARKER" "$SHIM_DST" 2>/dev/null; then
+        # Bereits unser Shim (Upgrade-Fall) - aktualisieren
+        install_shim=1
+    else
+        echo "WireGuard: /usr/bin/resolvconf existiert bereits (echtes resolvconf?) - Shim wird NICHT installiert."
+    fi
+
+    if [ "$install_shim" = "1" ]; then
+        cp -f "$SHIM_SRC" "$SHIM_DST"
+        chmod 755 "$SHIM_DST"
+        echo "WireGuard: resolvconf-Shim nach $SHIM_DST installiert."
+    fi
+fi
+
+# Init-Script aktivieren
+chmod +x /etc/init.d/wireguard-simple 2>/dev/null || true
+if command -v update-rc.d > /dev/null 2>&1; then
+    update-rc.d wireguard-simple defaults 2>/dev/null || true
+fi
+
+# Enigma2 neu starten damit das Plugin geladen wird
+if pidof enigma2 > /dev/null 2>&1; then
+    echo "WireGuard: Bitte Enigma2 neu starten um das Plugin zu aktivieren."
+fi
+
+echo "WireGuard Simple Plugin installiert."
+echo "Lege WireGuard-Configs in /etc/wireguard/ ab (*.conf)"

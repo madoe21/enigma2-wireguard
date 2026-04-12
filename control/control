@@ -1,0 +1,25 @@
+Package: enigma2-plugin-extensions-wireguard
+Version: 1.0.0
+Architecture: all
+Maintainer: madoe21 <https://github.com/madoe21>
+Section: extra
+Priority: optional
+Depends: enigma2, python3, curl, wireguard-tools, kernel-module-wireguard
+Recommends: iptables, kernel-module-iptable-mangle, kernel-module-xt-mark, kernel-module-xt-comment, kernel-module-xt-connmark
+Description: WireGuard VPN Plugin für Enigma2.
+ Schlichtes Plugin zum Verwalten von WireGuard-Verbindungen via .conf Dateien.
+ Unterstützt vollwertiges Policy-Routing via AllowedIPs, Domain-Ausnahmen
+ und IP/DNS-Leak-Tests.
+ .
+ Hinweise zu Abhängigkeiten:
+ - wireguard-tools liefert 'wg' und 'wg-quick'.
+ - kernel-module-wireguard wird für das Kernel-Interface benötigt.
+ - Die Recommends (iptables/xt-*) werden nur gebraucht, wenn eine .conf
+   AllowedIPs = 0.0.0.0/0 oder ::/0 enthält (Full-Tunnel-Modus mit
+   wg-quick's fwmark/iptables-Trick). Split-Tunnel-Configs (z. B. Mullvad
+   mit LAN-Access) funktionieren auch ohne diese Pakete.
+ - kernel-module-iptable-raw ist auf vielen Enigma2-Images NICHT verfügbar
+   und wird daher nicht als Abhängigkeit aufgenommen. Configs mit
+   AllowedIPs = 0.0.0.0/0 können auf solchen Boxen fehlschlagen. In diesem
+   Fall entweder eine Split-Tunnel-Config verwenden oder 'Table = off'
+   in der .conf setzen und die Routen manuell verwalten.

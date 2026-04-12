@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/Users/marti/AppData/Local/Programs/Python/Python314/Scripts/pip.exe install:*)",
+      "Bash(py:*)",
+      "Bash(unset PYTHONHOME PYTHONPATH)",
+      "Bash(/c/Python314/python.exe -c \"import sys; print\\(sys.executable\\); print\\(sys.path\\)\")",
+      "Read(//c/Users/marti/AppData/Local/Programs/Python/**)",
+      "Bash(find /c -maxdepth 3 -name \"python.exe\")",
+      "Bash(/c/Python312/python.exe:*)",
+      "Bash(make ipk:*)",
+      "Bash(where make:*)"
+    ]
+  }
+}

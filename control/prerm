@@ -1,0 +1,49 @@
+#!/bin/sh
+# Pre-Remove Script
+
+SHIM_DST=/usr/bin/resolvconf
+SHIM_MARKER="WG_SIMPLE_SHIM_MARKER_v1"
+RESOLV=/etc/resolv.conf
+RESOLV_BACKUP=/tmp/wg-simple-resolv.conf.backup
+
+# Aktive WireGuard-Verbindungen trennen
+if command -v wg > /dev/null 2>&1; then
+    for iface in $(wg show interfaces 2>/dev/null); do
+        wg-quick down "$iface" 2>/dev/null || true
+    done
+fi
+
+# /etc/resolv.conf entsperren und ggf. Backup zurückspielen
+chattr -i "$RESOLV" 2>/dev/null || true
+if [ -f "$RESOLV_BACKUP" ]; then
+    mv -f "$RESOLV_BACKUP" "$RESOLV" 2>/dev/null || true
+fi
+
+# resolvconf-Shim nur entfernen wenn es wirklich unserer ist
+if [ -f "$SHIM_DST" ] && grep -q "$SHIM_MARKER" "$SHIM_DST" 2>/dev/null; then
+    rm -f "$SHIM_DST"
+    echo "WireGuard: resolvconf-Shim entfernt."
+fi
+
+# Endpoint-Host-Routen aufräumen
+if [ -f /tmp/wg-simple-endpoint-routes.txt ]; then
+    while IFS= read -r ip; do
+        [ -z "$ip" ] && continue
+        if echo "$ip" | grep -q ':'; then
+            ip -6 route del "$ip" 2>/dev/null || true
+        else
+            ip -4 route del "$ip" 2>/dev/null || true
+        fi
+    done < /tmp/wg-simple-endpoint-routes.txt
+    rm -f /tmp/wg-simple-endpoint-routes.txt
+fi
+
+# Bypass-Routen aufräumen
+if [ -f /tmp/wg-simple-routes.txt ]; then
+    while IFS= read -r ip; do
+        ip route del "$ip" 2>/dev/null || true
+    done < /tmp/wg-simple-routes.txt
+    rm -f /tmp/wg-simple-routes.txt
+fi
+
+echo "WireGuard Plugin entfernt."

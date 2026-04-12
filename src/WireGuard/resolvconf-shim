@@ -1,0 +1,52 @@
+#!/bin/sh
+# resolvconf shim for wg-quick
+# Installed by enigma2-plugin-extensions-wireguard
+# WG_SIMPLE_SHIM_MARKER_v1 - do not remove this line, prerm uses it
+#
+# wg-quick calls:
+#   resolvconf -a <iface> -m <metric> -x   (with "nameserver X" lines on stdin)
+#   resolvconf -d <iface>                  (to remove DNS)
+#
+# This shim writes /etc/resolv.conf directly and protects it against
+# udhcpc overwrites via chattr +i (if supported by the filesystem).
+
+BACKUP=/tmp/wg-simple-resolv.conf.backup
+RESOLV=/etc/resolv.conf
+
+unlock_resolv() {
+    chattr -i "$RESOLV" 2>/dev/null || true
+}
+
+lock_resolv() {
+    chattr +i "$RESOLV" 2>/dev/null || true
+}
+
+case "$1" in
+    -a)
+        # Backup existing resolv.conf once per session
+        if [ -f "$RESOLV" ] && [ ! -f "$BACKUP" ]; then
+            unlock_resolv
+            cp -f "$RESOLV" "$BACKUP" 2>/dev/null || true
+        fi
+        unlock_resolv
+        # stdin from wg-quick: "nameserver X.X.X.X" (and optionally "search ...")
+        cat > "$RESOLV"
+        lock_resolv
+        ;;
+    -d)
+        unlock_resolv
+        if [ -f "$BACKUP" ]; then
+            mv -f "$BACKUP" "$RESOLV"
+        fi
+        # Do not re-lock on restore - let the system manage it again
+        ;;
+    -l|--list|-u|--updates|-I|--interface-order)
+        # Best-effort no-ops so scripts that query us don't error out
+        exit 0
+        ;;
+    *)
+        # Unknown invocation - exit success so we don't break wg-quick
+        exit 0
+        ;;
+esac
+exit 0

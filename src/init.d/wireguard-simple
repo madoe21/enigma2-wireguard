@@ -1,0 +1,279 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          wireguard-simple
+# Required-Start:    $network $local_fs
+# Required-Stop:     $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: WireGuard Simple - Autostart
+# Description:       Startet WireGuard VPN beim Booten basierend auf der
+#                    Plugin-Konfiguration. Wird VOR Enigma2 ausgeführt.
+### END INIT INFO
+
+# Konfigurationsdatei des Plugins (wird von Enigma2/Python geschrieben)
+PLUGIN_SETTINGS="/etc/enigma2/wireguardsimple.conf"
+WG_CONFIG_DIR="/etc/wireguard"
+PIDFILE="/var/run/wireguard-simple.pid"
+ENDPOINT_ROUTES_FILE="/tmp/wg-simple-endpoint-routes.txt"
+
+# Setzt /32-Host-Routen zu allen Endpoints einer .conf über das echte
+# Default-Gateway. Verhindert Routing-Loops bei Split-Tunnel-Configs
+# (Mullvad etc.), deren AllowedIPs den Endpoint mit abdecken würden.
+add_endpoint_routes() {
+    local conf_path="$1"
+    [ -f "$conf_path" ] || return 0
+
+    local gw4 dev4 gw6 dev6
+    gw4=$(ip -4 route show default 2>/dev/null | awk '/default via/ {print $3; exit}')
+    dev4=$(ip -4 route show default 2>/dev/null | awk '/default via/ {print $5; exit}')
+    gw6=$(ip -6 route show default 2>/dev/null | awk '/default via/ {print $3; exit}')
+    dev6=$(ip -6 route show default 2>/dev/null | awk '/default via/ {print $5; exit}')
+
+    : > "$ENDPOINT_ROUTES_FILE"
+
+    # Endpoint-Zeilen parsen
+    grep -E "^\s*Endpoint\s*=" "$conf_path" | while read -r line; do
+        ep=$(echo "$line" | cut -d'=' -f2- | tr -d ' ')
+        [ -z "$ep" ] && continue
+        # Host vom Port trennen
+        if echo "$ep" | grep -q '^\['; then
+            host=$(echo "$ep" | sed -n 's/^\[\([^]]*\)\].*/\1/p')
+        else
+            host=$(echo "$ep" | sed 's/:[0-9]*$//')
+        fi
+        [ -z "$host" ] && continue
+        # Wenn host bereits eine IP-Literal ist, KEIN DNS-Lookup -
+        # BusyBox nslookup gibt die Server-Adresse "8.8.8.8:53" als
+        # "Address:" aus, was unser Parser fälschlich als Antwort nimmt.
+        if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            ips="$host"
+        elif echo "$host" | grep -q ':'; then
+            # IPv6-Literal
+            ips="$host"
+        else
+            # Hostname auflösen. BusyBox-nslookup-Format:
+            #   Server: ...
+            #   Address: <server>:53
+            #   <leerzeile>
+            #   Name: host
+            #   Address: 1.2.3.4
+            # Wir nehmen nur Address-Zeilen NACH dem ersten "Name:".
+            ips=$(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+            if [ -z "$ips" ]; then
+                ips=$(nslookup "$host" 2>/dev/null | awk '
+                    /^Name:/ {seen_name=1; next}
+                    seen_name && /^Address/ {print $NF}
+                ' | grep -vE ':[0-9]+$' | grep -v '^$' | sort -u)
+            fi
+            [ -z "$ips" ] && ips="$host"
+        fi
+
+        for ip in $ips; do
+            if echo "$ip" | grep -q ':'; then
+                [ -n "$gw6" ] && [ -n "$dev6" ] || continue
+                ip -6 route del "$ip" 2>/dev/null
+                if ip -6 route add "$ip" via "$gw6" dev "$dev6" 2>/dev/null; then
+                    echo "$ip" >> "$ENDPOINT_ROUTES_FILE"
+                fi
+            else
+                [ -n "$gw4" ] && [ -n "$dev4" ] || continue
+                ip -4 route del "$ip" 2>/dev/null
+                if ip -4 route add "$ip" via "$gw4" dev "$dev4" 2>/dev/null; then
+                    echo "$ip" >> "$ENDPOINT_ROUTES_FILE"
+                fi
+            fi
+        done
+    done
+}
+
+remove_endpoint_routes() {
+    [ -f "$ENDPOINT_ROUTES_FILE" ] || return 0
+    while IFS= read -r ip; do
+        [ -z "$ip" ] && continue
+        if echo "$ip" | grep -q ':'; then
+            ip -6 route del "$ip" 2>/dev/null
+        else
+            ip -4 route del "$ip" 2>/dev/null
+        fi
+    done < "$ENDPOINT_ROUTES_FILE"
+    rm -f "$ENDPOINT_ROUTES_FILE"
+}
+
+# Liest einen Wert aus der Plugin-Settings-Datei
+# Format: key=value
+get_setting() {
+    local key="$1"
+    local default="$2"
+    if [ -f "$PLUGIN_SETTINGS" ]; then
+        val=$(grep "^${key}=" "$PLUGIN_SETTINGS" 2>/dev/null | cut -d'=' -f2-)
+        echo "${val:-$default}"
+    else
+        echo "$default"
+    fi
+}
+
+# Wartet bis das System ein Default-Gateway hat (DHCP/WLAN-Association
+# kann beim Boot mehrere Sekunden brauchen, bevor das Netzwerk wirklich
+# nutzbar ist - obwohl $network laut SysV-Init schon "ready" ist).
+# Timeout: 60 Sekunden.
+wait_for_network() {
+    local i=0
+    while [ $i -lt 60 ]; do
+        if ip -4 route show default 2>/dev/null | grep -q "default via"; then
+            # Zusätzlich kurz prüfen dass das Gateway pingbar ist
+            local gw
+            gw=$(ip -4 route show default 2>/dev/null | awk '/default via/ {print $3; exit}')
+            if [ -n "$gw" ] && ping -c 1 -W 2 "$gw" >/dev/null 2>&1; then
+                echo "WireGuard Simple: Netzwerk bereit (Gateway $gw nach ${i}s)"
+                return 0
+            fi
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    echo "WireGuard Simple: WARNUNG - Netzwerk nach 60s nicht bereit, versuche trotzdem."
+    return 1
+}
+
+do_start() {
+    # Prüfe ob Autostart aktiviert ist
+    autostart=$(get_setting "autostart" "false")
+    if [ "$autostart" != "true" ]; then
+        echo "WireGuard Simple: Autostart nicht aktiviert, überspringe."
+        return 0
+    fi
+
+    # Prüfe ob wg-quick verfügbar
+    if ! command -v wg-quick > /dev/null 2>&1; then
+        echo "WireGuard Simple: wg-quick nicht gefunden, überspringe."
+        return 1
+    fi
+
+    # Config ermitteln
+    interface=$(get_setting "config_file" "")
+    if [ -z "$interface" ]; then
+        # Erste verfügbare Config nehmen
+        for f in "$WG_CONFIG_DIR"/*.conf; do
+            [ -f "$f" ] && interface=$(basename "$f" .conf) && break
+        done
+    fi
+
+    if [ -z "$interface" ]; then
+        echo "WireGuard Simple: Keine Config in $WG_CONFIG_DIR gefunden."
+        return 1
+    fi
+
+    conf_path="$WG_CONFIG_DIR/${interface}.conf"
+    if [ ! -f "$conf_path" ]; then
+        echo "WireGuard Simple: Config nicht gefunden: $conf_path"
+        return 1
+    fi
+
+    # Prüfe ob bereits verbunden
+    if wg show "$interface" > /dev/null 2>&1; then
+        echo "WireGuard Simple: $interface bereits aktiv."
+        return 0
+    fi
+
+    # WICHTIG: Auf Netzwerk warten, bevor wir Gateway/Routen ermitteln.
+    # Sonst landet der Endpoint in der WG-Routing-Tabelle (Loop) und
+    # es fließt kein Traffic, obwohl das Interface "up" ist.
+    wait_for_network
+
+    # Domain-Ausnahmen vor VPN-Start setzen
+    domains=$(get_setting "domain_exceptions" "")
+    if [ -n "$domains" ]; then
+        echo "WireGuard Simple: Setze Domain-Ausnahmen..."
+        gateway=$(ip route show default 2>/dev/null | awk '/default via/ {print $3; exit}')
+        dev=$(ip route show default 2>/dev/null | awk '/default via/ {print $5; exit}')
+        if [ -n "$gateway" ] && [ -n "$dev" ]; then
+            echo "$domains" | tr ',' '\n' | while read -r domain; do
+                domain=$(echo "$domain" | tr -d ' ')
+                [ -z "$domain" ] && continue
+                # Domain auflösen
+                ips=$(nslookup "$domain" 2>/dev/null | awk '/^Address: / {print $2}')
+                for ip in $ips; do
+                    # Nur IPv4
+                    echo "$ip" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
+                    ip route add "$ip" via "$gateway" dev "$dev" metric 100 2>/dev/null
+                    echo "$ip" >> /tmp/wg-simple-routes.txt
+                done
+            done
+        fi
+    fi
+
+    # Endpoint-Host-Routen VOR wg-quick up setzen
+    add_endpoint_routes "$conf_path"
+
+    # WireGuard starten
+    echo "WireGuard Simple: Starte $interface..."
+    wg-quick up "$interface"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        remove_endpoint_routes
+    fi
+
+    if [ $rc -eq 0 ]; then
+        echo "WireGuard Simple: $interface gestartet."
+        echo "$interface" > "$PIDFILE"
+    else
+        echo "WireGuard Simple: Fehler beim Starten von $interface (rc=$rc)"
+    fi
+
+    return $rc
+}
+
+do_stop() {
+    # Endpoint-Host-Routen aufräumen
+    remove_endpoint_routes
+
+    # Domain-Ausnahmen aufräumen
+    if [ -f /tmp/wg-simple-routes.txt ]; then
+        while IFS= read -r ip; do
+            [ -n "$ip" ] && ip route del "$ip" 2>/dev/null
+        done < /tmp/wg-simple-routes.txt
+        rm -f /tmp/wg-simple-routes.txt
+    fi
+
+    # Alle vom Plugin gestarteten Interfaces stoppen
+    if [ -f "$PIDFILE" ]; then
+        interface=$(cat "$PIDFILE")
+        if [ -n "$interface" ]; then
+            echo "WireGuard Simple: Stoppe $interface..."
+            wg-quick down "$interface" 2>/dev/null
+        fi
+        rm -f "$PIDFILE"
+    else
+        # Fallback: alle laufenden wg-Interfaces stoppen die eine Config haben
+        for iface in $(wg show interfaces 2>/dev/null); do
+            if [ -f "$WG_CONFIG_DIR/${iface}.conf" ]; then
+                echo "WireGuard Simple: Stoppe $iface..."
+                wg-quick down "$iface" 2>/dev/null
+            fi
+        done
+    fi
+}
+
+do_status() {
+    interfaces=$(wg show interfaces 2>/dev/null)
+    if [ -z "$interfaces" ]; then
+        echo "WireGuard Simple: Kein aktives Interface"
+        return 1
+    fi
+    echo "WireGuard Simple: Aktive Interfaces: $interfaces"
+    wg show
+    return 0
+}
+
+case "$1" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart) do_stop; sleep 1; do_start ;;
+    status)  do_status ;;
+    *)
+        echo "Verwendung: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit $?
