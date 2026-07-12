@@ -5,6 +5,17 @@ SHIM_DST=/usr/bin/resolvconf
 SHIM_MARKER="WG_SIMPLE_SHIM_MARKER_v1"
 RESOLV=/etc/resolv.conf
 RESOLV_BACKUP=/tmp/wg-simple-resolv.conf.backup
+WAS_UP_STATE=/tmp/wg-simple-was-up.txt
+
+# opkg runs prerm on every upgrade too (remove-old, then install-new), not
+# just on an actual uninstall. Record which tunnels were active so postinst
+# can bring them back once the new version is in place - without this, every
+# plugin update silently drops the user's active VPN connection and DNS
+# routing until they notice and reconnect by hand.
+if command -v wg > /dev/null 2>&1; then
+    wg show interfaces 2>/dev/null > "$WAS_UP_STATE"
+    [ -s "$WAS_UP_STATE" ] || rm -f "$WAS_UP_STATE"
+fi
 
 # Aktive WireGuard-Verbindungen trennen
 if command -v wg > /dev/null 2>&1; then

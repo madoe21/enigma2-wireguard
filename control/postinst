@@ -45,5 +45,18 @@ if pidof enigma2 > /dev/null 2>&1; then
     echo "WireGuard: Bitte Enigma2 neu starten um das Plugin zu aktivieren."
 fi
 
+# Tunnels reconnect that prerm brought down for this upgrade (see prerm) -
+# an in-place update must not leave the box without its VPN/DNS routing.
+WAS_UP_STATE=/tmp/wg-simple-was-up.txt
+if [ -f "$WAS_UP_STATE" ] && command -v wg-quick > /dev/null 2>&1; then
+    while IFS= read -r iface; do
+        [ -z "$iface" ] && continue
+        wg-quick up "$iface" 2>/dev/null \
+            && echo "WireGuard: Tunnel '$iface' nach Update wieder verbunden." \
+            || echo "WireGuard: Tunnel '$iface' konnte nach Update nicht automatisch neu verbunden werden - bitte manuell pruefen."
+    done < "$WAS_UP_STATE"
+    rm -f "$WAS_UP_STATE"
+fi
+
 echo "WireGuard Simple Plugin installiert."
 echo "Lege WireGuard-Configs in /etc/wireguard/ ab (*.conf)"
