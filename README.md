@@ -1,5 +1,7 @@
 # WireGuard – Enigma2 Plugin
 
+[![Built with aiflow](https://img.shields.io/badge/built%20with-aiflow-6b46c1)](https://github.com/cyber93de/aiflow)
+
 WireGuard VPN plugin for Enigma2. Manage WireGuard connections directly from
 the remote using `.conf` files placed in `/etc/wireguard/`. Supports full
 policy routing via AllowedIPs, domain exclusions and IP/DNS leak tests.
