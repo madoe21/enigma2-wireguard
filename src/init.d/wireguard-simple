@@ -15,6 +15,31 @@ PLUGIN_SETTINGS="/etc/enigma2/wireguardsimple.conf"
 WG_CONFIG_DIR="/etc/wireguard"
 PIDFILE="/var/run/wireguard-simple.pid"
 ENDPOINT_ROUTES_FILE="/tmp/wg-simple-endpoint-routes.txt"
+RESOLV="/etc/resolv.conf"
+RESOLV_MARKER="# WG_SIMPLE_DNS"
+
+# Der resolvconf-Shim macht /etc/resolv.conf per "chattr +i" unveraenderlich,
+# solange der Tunnel steht - und das Attribut ueberlebt einen Reboot. Kommt die
+# Box hoch, ohne dass "wg-quick down" je gelaufen ist (Stromausfall, Absturz,
+# haengender Shutdown), bliebe die Datei mit der VPN-DNS gesperrt: weder udhcpc
+# noch Enigma2 koennten die Netzwerk-DNS je wieder setzen. Darum beim Boot
+# immer entsperren und - falls kein Tunnel laeuft - die System-DNS
+# zurueckholen.
+dns_safety_net() {
+    chattr -i "$RESOLV" 2>/dev/null || true
+
+    # Laeuft noch ein WireGuard-Interface, gehoert die DNS auch dorthin.
+    if wg show interfaces 2>/dev/null | grep -q '[^[:space:]]'; then
+        return 0
+    fi
+
+    head -n 1 "$RESOLV" 2>/dev/null | grep -q "^${RESOLV_MARKER}" || return 0
+
+    echo "WireGuard Simple: VPN-DNS ohne aktiven Tunnel gefunden - stelle System-DNS wieder her."
+    if command -v resolvconf > /dev/null 2>&1; then
+        resolvconf --wg-simple-restore 2>/dev/null || true
+    fi
+}
 
 # Setzt /32-Host-Routen zu allen Endpoints einer .conf über das echte
 # Default-Gateway. Verhindert Routing-Loops bei Split-Tunnel-Configs
@@ -136,6 +161,10 @@ wait_for_network() {
 }
 
 do_start() {
+    # Erst aufraeumen was ein unsauberer Shutdown hinterlassen hat - das muss
+    # auch dann laufen, wenn Autostart aus ist.
+    dns_safety_net
+
     # Prüfe ob Autostart aktiviert ist
     autostart=$(get_setting "autostart" "false")
     if [ "$autostart" != "true" ]; then
@@ -252,6 +281,10 @@ do_stop() {
             fi
         done
     fi
+
+    # Falls wg-quick die DNS nicht zurueckgesetzt hat (kein DNS= in der .conf,
+    # Shim nicht installiert, down fehlgeschlagen), hier nachziehen.
+    dns_safety_net
 }
 
 do_status() {

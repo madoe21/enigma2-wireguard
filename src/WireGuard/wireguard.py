@@ -19,6 +19,14 @@ WG_CONFIG_DIR = "/etc/wireguard"
 SETTINGS_FILE = "/etc/enigma2/wireguardsimple.conf"
 ENDPOINT_ROUTES_FILE = "/tmp/wg-simple-endpoint-routes.txt"
 
+# DNS-Wiederherstellung. Muss zum resolvconf-Shim passen
+# (src/WireGuard/resolvconf-shim), der /etc/resolv.conf beim Verbinden
+# ueberschreibt und per "chattr +i" sperrt.
+RESOLV_CONF = "/etc/resolv.conf"
+RESOLV_MARKER = "# WG_SIMPLE_DNS"
+RESOLV_BACKUP = "/etc/enigma2/wg-simple-resolv.conf.backup"
+RESOLV_BACKUP_LEGACY = "/tmp/wg-simple-resolv.conf.backup"
+
 # Plugin-Konfiguration
 
 # Erweiterung: IP-Modus (IPv4/IPv6/beides)
@@ -76,6 +84,78 @@ def run_cmd_async(cmd, callback, timeout=15):
     d = deferToThread(run_cmd, cmd, timeout)
     d.addCallback(lambda result: callback(*result))
     return d
+
+
+def _default_gateway(family=4):
+    """Ermittelt (gateway, dev) für die Default-Route der angegebenen Familie."""
+    proto = "-4" if family == 4 else "-6"
+    rc, out, _ = run_cmd("ip %s route show default" % proto)
+    if rc != 0 or not out:
+        return None, None
+    m = re.search(r"default\s+via\s+(\S+)\s+dev\s+(\S+)", out)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+
+def resolv_is_wireguard():
+    """Prüft ob /etc/resolv.conf aktuell die DNS des Tunnels enthält."""
+    try:
+        with open(RESOLV_CONF, "r") as f:
+            return f.readline().startswith(RESOLV_MARKER)
+    except Exception:
+        return False
+
+
+def restore_system_dns():
+    """
+    Stellt die DNS-Einstellung des Netzwerks wieder her.
+
+    wg-quick ruft beim "down" normalerweise "resolvconf -d" auf - das erledigt
+    der Shim. Darauf allein ist aber kein Verlass: das down kann fehlschlagen,
+    der Shim kann fehlen (echtes resolvconf installiert), oder eine VPN-DNS aus
+    einer früheren Sitzung liegt noch herum. Ohne diesen Nachzug bleibt die
+    VPN-DNS dauerhaft in der Netzwerk-Einstellung stehen.
+    """
+    # Immutable-Flag des Shims lösen - sonst kann niemand mehr schreiben,
+    # auch udhcpc und Enigma2 nicht.
+    run_cmd("chattr -i %s" % RESOLV_CONF, timeout=5)
+
+    if not resolv_is_wireguard():
+        return True
+
+    # Bevorzugt über den Shim, damit die Logik an einer Stelle lebt.
+    run_cmd("resolvconf --wg-simple-restore", timeout=10)
+    if not resolv_is_wireguard():
+        return True
+
+    # Shim fehlt oder hat nicht gegriffen: Backup selbst zurückspielen.
+    for backup in (RESOLV_BACKUP, RESOLV_BACKUP_LEGACY):
+        if not os.path.isfile(backup):
+            continue
+        try:
+            with open(backup, "r") as src:
+                data = src.read()
+            with open(RESOLV_CONF, "w") as dst:
+                dst.write(data)
+            os.remove(backup)
+            return True
+        except Exception as e:
+            print("[WireGuard Simple] DNS-Backup %s nicht wiederherstellbar: %s" % (backup, e))
+
+    # Kein Backup vorhanden: wenigstens die VPN-DNS entfernen und einen
+    # funktionierenden Resolver hinterlassen, statt die Box blind zu machen.
+    gw, _ = _default_gateway()
+    try:
+        with open(RESOLV_CONF, "w") as f:
+            if gw:
+                f.write("nameserver %s\n" % gw)
+    except Exception as e:
+        print("[WireGuard Simple] Konnte %s nicht zurücksetzen: %s" % (RESOLV_CONF, e))
+        return False
+    # udhcpc die DHCP-Nameserver neu setzen lassen.
+    run_cmd('for p in /var/run/udhcpc*.pid; do [ -f "$p" ] && kill -USR1 $(cat "$p") 2>/dev/null; done', timeout=5)
+    return True
 
 
 class WireGuardManager:
@@ -246,14 +326,7 @@ class WireGuardManager:
 
     def _get_default_route(self, family=4):
         """Ermittelt (gateway, dev) für die Default-Route der angegebenen Familie."""
-        proto = "-4" if family == 4 else "-6"
-        rc, out, _ = run_cmd("ip %s route show default" % proto)
-        if rc != 0 or not out:
-            return None, None
-        m = re.search(r"default\s+via\s+(\S+)\s+dev\s+(\S+)", out)
-        if m:
-            return m.group(1), m.group(2)
-        return None, None
+        return _default_gateway(family)
 
     def _add_endpoint_routes(self, interface_name):
         """
@@ -344,6 +417,7 @@ class WireGuardManager:
         if active and active != interface_name:
             run_cmd("wg-quick down %s" % active, timeout=10)
             self._remove_endpoint_routes()
+            restore_system_dns()
 
         # Endpoint-Host-Routen VOR wg-quick up setzen, damit die
         # WireGuard-Handshake-Pakete am Tunnel vorbeigeroutet werden.
@@ -358,8 +432,11 @@ class WireGuardManager:
                 self._active_interface = interface_name
             else:
                 self._active_interface = None
-                # Rollback: Endpoint-Routen wieder entfernen wenn Verbindung scheitert
+                # Rollback: Endpoint-Routen wieder entfernen wenn Verbindung
+                # scheitert. wg-quick kann die DNS bereits gesetzt haben, bevor
+                # ein späterer Schritt fehlschlägt - die also auch zurücknehmen.
                 self._remove_endpoint_routes()
+                restore_system_dns()
             if callback:
                 callback(success, msg)
 
@@ -371,12 +448,16 @@ class WireGuardManager:
                 self._active_interface = interface_name
             else:
                 self._remove_endpoint_routes()
+                restore_system_dns()
             return rc == 0
 
     def disconnect(self, interface_name=None, callback=None):
         """Trennt die WireGuard-Verbindung via wg-quick down."""
         iface = interface_name or self.get_active_interface()
         if not iface:
+            # Kein Interface aktiv - es kann aber noch eine VPN-DNS aus einer
+            # abgebrochenen Sitzung in /etc/resolv.conf stehen.
+            restore_system_dns()
             if callback:
                 callback(True, "Nicht verbunden")
             return
@@ -386,8 +467,9 @@ class WireGuardManager:
             msg = out if success else (err or out or "Unbekannter Fehler")
             if success:
                 self._active_interface = None
-            # Endpoint-Host-Routen in jedem Fall aufräumen
+            # Endpoint-Host-Routen und VPN-DNS in jedem Fall aufräumen
             self._remove_endpoint_routes()
+            restore_system_dns()
             if callback:
                 callback(success, msg)
 
@@ -396,6 +478,7 @@ class WireGuardManager:
         else:
             rc, out, err = run_cmd("wg-quick down %s" % iface, timeout=15)
             self._remove_endpoint_routes()
+            restore_system_dns()
             return rc == 0
 
     def check_wg_available(self):
