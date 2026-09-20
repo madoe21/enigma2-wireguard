@@ -35,19 +35,31 @@ jobs:
           ls -l build/*.ipk
 
       - name: Check VERSION suffix matches branch
+        # develop carries the rolling build counter, main never carries a suffix.
         # A main -> develop back-merge legitimately carries the clean release
-        # version, so it is exempt from the develop build-counter rule.
+        # version, so it is exempt from the develop rule.
         if: github.head_ref != 'main'
         run: |
           RAW=$(tr -d '[:space:]' < VERSION)
           BASE_REF="${{ github.base_ref || github.ref_name }}"
-          echo "VERSION=$RAW base=$BASE_REF"
+          HEAD_REF="${{ github.head_ref }}"
+          echo "VERSION=$RAW base=$BASE_REF head=$HEAD_REF"
           case "$BASE_REF" in
             develop)
-              # develop always carries the rolling build counter
               case "$RAW" in
                 *-build[0-9]*) : ;;
                 *) echo "::error::VERSION '$RAW' on develop must look like X.Y.Z-buildN"; exit 1 ;;
+              esac
+              ;;
+            main)
+              case "$RAW" in
+                *-*)
+                  if [ "$HEAD_REF" = develop ] || case "$HEAD_REF" in hotfix/*) true ;; *) false ;; esac; then
+                    echo "::warning::VERSION is still '$RAW' -- prepare-release strips the suffix on $HEAD_REF"
+                  else
+                    echo "::error::VERSION '$RAW' must be a clean X.Y.Z on main"; exit 1
+                  fi
+                  ;;
               esac
               ;;
           esac
