@@ -4,7 +4,9 @@
 SHIM_DST=/usr/bin/resolvconf
 SHIM_MARKER="WG_SIMPLE_SHIM_MARKER_v1"
 RESOLV=/etc/resolv.conf
-RESOLV_BACKUP=/tmp/wg-simple-resolv.conf.backup
+RESOLV_MARKER="# WG_SIMPLE_DNS"
+RESOLV_BACKUP=/etc/enigma2/wg-simple-resolv.conf.backup
+RESOLV_BACKUP_LEGACY=/tmp/wg-simple-resolv.conf.backup
 WAS_UP_STATE=/tmp/wg-simple-was-up.txt
 
 # opkg runs prerm on every upgrade too (remove-old, then install-new), not
@@ -24,10 +26,16 @@ if command -v wg > /dev/null 2>&1; then
     done
 fi
 
-# /etc/resolv.conf entsperren und ggf. Backup zurückspielen
+# /etc/resolv.conf entsperren und - nur falls dort noch die VPN-DNS steht -
+# das Backup zurückspielen. Der Marker-Check verhindert, dass ein altes Backup
+# eine inzwischen gültige System-DNS überschreibt.
 chattr -i "$RESOLV" 2>/dev/null || true
-if [ -f "$RESOLV_BACKUP" ]; then
-    mv -f "$RESOLV_BACKUP" "$RESOLV" 2>/dev/null || true
+if head -n 1 "$RESOLV" 2>/dev/null | grep -q "^${RESOLV_MARKER}"; then
+    if [ -f "$RESOLV_BACKUP" ]; then
+        mv -f "$RESOLV_BACKUP" "$RESOLV" 2>/dev/null || true
+    elif [ -f "$RESOLV_BACKUP_LEGACY" ]; then
+        mv -f "$RESOLV_BACKUP_LEGACY" "$RESOLV" 2>/dev/null || true
+    fi
 fi
 
 # resolvconf-Shim nur entfernen wenn es wirklich unserer ist
