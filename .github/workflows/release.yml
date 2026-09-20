@@ -22,6 +22,7 @@ jobs:
     outputs:
       released: ${{ steps.check.outputs.released }}
       version: ${{ steps.ver.outputs.version }}
+      package: ${{ steps.ver.outputs.package }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,8 +43,11 @@ jobs:
             [0-9]*.[0-9]*.[0-9]*) : ;;
             *) echo "::error::VERSION '$RAW' is not X.Y.Z"; exit 1 ;;
           esac
+          PKG=$(awk '/^Package:/{print $2;exit}' control/control)
+          test -n "$PKG"
           echo "version=$RAW" >> "$GITHUB_OUTPUT"
           echo "tag=v$RAW" >> "$GITHUB_OUTPUT"
+          echo "package=$PKG" >> "$GITHUB_OUTPUT"
 
       - name: Skip if this version is already released
         id: check
@@ -115,17 +119,18 @@ jobs:
         run: |
           URL=https://madoe21.github.io/enigma2-madoe21-feed/feed/Packages
           WANT="${{ needs.release.outputs.version }}"
+          PKG="${{ needs.release.outputs.package }}"
           for i in $(seq 1 30); do
             sleep 20
             if curl -fsS "$URL" \
-                 | awk '/^Package: enigma2-plugin-extensions-wireguard$/{f=1;next} f&&/^Version:/{print $2;exit}' \
+                 | awk -v pkg="$PKG" '$0=="Package: "pkg{f=1;next} f&&/^Version:/{print $2;exit}' \
                  | grep -qx "$WANT"; then
-              echo "::notice::feed serves wireguard $WANT"
+              echo "::notice::feed serves $PKG $WANT"
               exit 0
             fi
-            echo "attempt $i: feed not on $WANT yet"
+            echo "attempt $i: feed not on $PKG $WANT yet"
           done
-          echo "::warning::feed did not serve wireguard $WANT within 10 minutes -- check the build-feed run"
+          echo "::warning::feed did not serve $PKG $WANT within 10 minutes -- check the build-feed run"
 
   bump-develop:
     needs: release
