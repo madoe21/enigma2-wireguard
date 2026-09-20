@@ -5,7 +5,7 @@
 | Branch      | VERSION looks like | Who sets it |
 |-------------|--------------------|-------------|
 | `develop`   | `X.Y.Z-buildN`     | `build-develop` raises `N` on every push |
-| `main`      | `X.Y.Z`            | `release` strips the suffix while releasing |
+| `main`      | `X.Y.Z`            | `prepare-release` strips the suffix in the release PR |
 | `hotfix/*`  | `X.Y.Z-HOTFIX`     | `aiflow hotfix` |
 
 `main` never carries a pre-release suffix once a release run has finished.

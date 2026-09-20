@@ -1,8 +1,9 @@
 name: release
 
-# A release is cut by merging develop (or a hotfix) into main. This workflow
-# strips the pre-release suffix that develop carries, tags, builds, publishes,
-# rebuilds the feed and finally opens the next build cycle on develop.
+# A release is cut by merging develop (or a hotfix) into main. The version that
+# lands on main is already clean -- prepare-release.yml strips the -buildN /
+# -HOTFIX suffix on the release branch while the PR is open. This workflow tags,
+# builds, publishes, rebuilds the feed and opens the next build cycle on develop.
 on:
   push:
     branches: [main]
@@ -17,8 +18,6 @@ concurrency:
 
 jobs:
   release:
-    # Skip the run caused by this workflow's own VERSION commit.
-    if: "!contains(github.event.head_commit.message, '[skip-release]')"
     runs-on: ubuntu-latest
     outputs:
       released: ${{ steps.check.outputs.released }}
@@ -29,26 +28,22 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Strip pre-release suffix from VERSION
+      - name: Read version
         id: ver
         run: |
           RAW=$(tr -d '[:space:]' < VERSION)
-          CLEAN=${RAW%%-*}
-          case "$CLEAN" in
+          case "$RAW" in
+            *-*)
+              echo "::error::VERSION on main is '$RAW'. main must never carry a pre-release"
+              echo "::error::suffix -- the prepare-release workflow strips it on the release"
+              echo "::error::branch before the merge (or run 'aiflow release --yes')."
+              exit 1
+              ;;
             [0-9]*.[0-9]*.[0-9]*) : ;;
-            *) echo "::error::VERSION '$RAW' is not X.Y.Z[-suffix]"; exit 1 ;;
+            *) echo "::error::VERSION '$RAW' is not X.Y.Z"; exit 1 ;;
           esac
-          if [ "$RAW" != "$CLEAN" ]; then
-            echo "::notice::main must never carry '$RAW' -- releasing as $CLEAN"
-            echo "$CLEAN" > VERSION
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add VERSION
-            git commit -m "chore(release): $CLEAN [skip-release] [skip ci]"
-            git push origin HEAD:main
-          fi
-          echo "version=$CLEAN" >> "$GITHUB_OUTPUT"
-          echo "tag=v$CLEAN" >> "$GITHUB_OUTPUT"
+          echo "version=$RAW" >> "$GITHUB_OUTPUT"
+          echo "tag=v$RAW" >> "$GITHUB_OUTPUT"
 
       - name: Skip if this version is already released
         id: check
