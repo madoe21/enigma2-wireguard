@@ -22,9 +22,12 @@ BOX_HOST ?=
 BOX_USER ?= root
 BOX_PORT ?= 22
 
-.PHONY: all build clean normalize prepare ipk install check-wg restart deploy
+.PHONY: all build clean normalize prepare ipk install check-wg restart deploy test
 
 all: ipk
+
+test:
+	sh tests/test-resolvconf-shim.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

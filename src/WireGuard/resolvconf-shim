@@ -9,9 +9,18 @@
 #
 # This shim writes /etc/resolv.conf directly and protects it against
 # udhcpc overwrites via chattr +i (if supported by the filesystem).
+#
+# Every resolv.conf we write carries RESOLV_MARKER in its first line. That is
+# the authoritative signal that the current DNS setup belongs to the tunnel and
+# must be rolled back on -d - it survives reboots and lost /tmp state, which a
+# backup file alone does not.
 
-BACKUP=/tmp/wg-simple-resolv.conf.backup
 RESOLV=/etc/resolv.conf
+# Persistent: /tmp is a tmpfs on enigma2 boxes, so a backup kept there is gone
+# after a reboot - and with it the only way to undo the tunnel's DNS.
+BACKUP=/etc/enigma2/wg-simple-resolv.conf.backup
+BACKUP_LEGACY=/tmp/wg-simple-resolv.conf.backup
+RESOLV_MARKER="# WG_SIMPLE_DNS"
 
 unlock_resolv() {
     chattr -i "$RESOLV" 2>/dev/null || true
@@ -21,24 +30,68 @@ lock_resolv() {
     chattr +i "$RESOLV" 2>/dev/null || true
 }
 
+# True when /etc/resolv.conf was written by us (i.e. holds tunnel DNS).
+resolv_is_ours() {
+    [ -f "$RESOLV" ] && head -n 1 "$RESOLV" 2>/dev/null | grep -q "^${RESOLV_MARKER}"
+}
+
+# Last resort when no backup exists: give the box a working resolver again
+# instead of leaving the tunnel's DNS (or an empty file) behind.
+regenerate_resolv() {
+    gw=$(ip -4 route show default 2>/dev/null | awk '/default via/ {print $3; exit}')
+    if [ -n "$gw" ]; then
+        printf 'nameserver %s\n' "$gw" > "$RESOLV"
+    else
+        : > "$RESOLV"
+    fi
+    # Ask udhcpc to re-apply the DHCP-provided nameservers; that overwrites the
+    # gateway guess above with the real ones a moment later.
+    for pid in /var/run/udhcpc*.pid; do
+        [ -f "$pid" ] || continue
+        kill -USR1 "$(cat "$pid")" 2>/dev/null || true
+    done
+}
+
+restore_resolv() {
+    unlock_resolv
+    # Migrate a backup written by an older version of this shim.
+    if [ ! -f "$BACKUP" ] && [ -f "$BACKUP_LEGACY" ]; then
+        mv -f "$BACKUP_LEGACY" "$BACKUP" 2>/dev/null || true
+    fi
+    if [ -f "$BACKUP" ]; then
+        cat "$BACKUP" > "$RESOLV" 2>/dev/null && rm -f "$BACKUP"
+    elif resolv_is_ours; then
+        regenerate_resolv
+    fi
+    rm -f "$BACKUP_LEGACY"
+    # Do not re-lock on restore - let the system manage it again.
+}
+
 case "$1" in
     -a)
-        # Backup existing resolv.conf once per session
-        if [ -f "$RESOLV" ] && [ ! -f "$BACKUP" ]; then
+        mkdir -p "$(dirname "$BACKUP")" 2>/dev/null || true
+        # Back up only a resolv.conf that is NOT already ours. Without that
+        # check a second "up" (e.g. after a down that never ran) would store the
+        # tunnel's own DNS as the "system" backup and restore it forever after.
+        if [ -f "$RESOLV" ] && ! resolv_is_ours; then
             unlock_resolv
             cp -f "$RESOLV" "$BACKUP" 2>/dev/null || true
         fi
+        rm -f "$BACKUP_LEGACY"
         unlock_resolv
         # stdin from wg-quick: "nameserver X.X.X.X" (and optionally "search ...")
-        cat > "$RESOLV"
+        { printf '%s %s\n' "$RESOLV_MARKER" "${2:-wg}"; cat; } > "$RESOLV"
         lock_resolv
         ;;
     -d)
+        restore_resolv
+        ;;
+    --wg-simple-restore)
+        # Private entry point for the plugin and the init script: undo our DNS
+        # if (and only if) it is still in place.
         unlock_resolv
-        if [ -f "$BACKUP" ]; then
-            mv -f "$BACKUP" "$RESOLV"
-        fi
-        # Do not re-lock on restore - let the system manage it again
+        resolv_is_ours && restore_resolv
+        exit 0
         ;;
     -l|--list|-u|--updates|-I|--interface-order)
         # Best-effort no-ops so scripts that query us don't error out
