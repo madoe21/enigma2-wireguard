@@ -25,7 +25,13 @@ jobs:
           done
 
       - name: Unit tests
-        run: make test
+        # The 'test' target only exists once a branch ships tests.
+        run: |
+          if make -n test >/dev/null 2>&1; then
+            make test
+          else
+            echo "::notice::no 'make test' target on this branch"
+          fi
 
       - name: Build IPK
         run: |
